@@ -40,7 +40,131 @@ setup_firewall_iptables() {
     fi
 }
 
-# ... (остальные функции скрипта) ...
+install_xray_core() {
+  echo "Запуск установки Xray core..."
+
+  apt update -y
+  apt install -y qrencode curl jq openssl
+
+  if ! sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+    echo "BBR включён"
+  else
+    echo "BBR уже включён"
+  fi
+
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || {
+    echo "Ошибка установки Xray"; return 1
+  }
+
+  systemctl daemon-reload
+  systemctl restart xray
+
+  echo "Xray core успешно установлен и перезапущен."
+}
+
+add_vless_user() {
+  local email="$1"
+  if jq -e --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email)' "$CONFIG_FILE" > /dev/null; then
+    echo "Пользователь с email $email уже существует." >&2
+    return 1
+  fi
+  local uid
+  uid=$(xray uuid)
+  jq --arg email "$email" --arg uid "$uid" '.inbounds[0].settings.clients += [{"email": $email, "id": $uid, "flow": "xtls-rprx-vision"}]' "$CONFIG_FILE" > tmp.$$.json && mv tmp.$$.json "$CONFIG_FILE"
+  echo "Пользователь VLESS $email добавлен с UUID: $uid"
+  systemctl restart xray
+}
+
+remove_vless_user() {
+  local email="$1"
+  if ! jq -e --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email)' "$CONFIG_FILE" > /dev/null; then
+    echo "Пользователь $email не найден." >&2
+    return 1
+  fi
+  jq --arg email "$email" '(.inbounds[0].settings.clients) |= map(select(.email != $email))' "$CONFIG_FILE" > tmp.$$.json && mv tmp.$$.json "$CONFIG_FILE"
+  echo "Пользователь VLESS $email удалён."
+  systemctl restart xray
+}
+
+list_vless_users() {
+  jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE"
+}
+
+add_mtproto_user() {
+  local secret
+  secret=$(openssl rand -hex 16)
+  jq --arg secret "$secret" '.inbounds[] |= if .protocol=="mtproto" then .settings.users += [{"secret": $secret}] else . end' "$CONFIG_FILE" > tmp.$$.json && mv tmp.$$.json "$CONFIG_FILE"
+  systemctl restart xray
+  echo "Добавлен новый MTProto секрет: $secret"
+}
+
+remove_mtproto_user() {
+  echo "Текущие секреты MTProto:"
+  jq -r '.inbounds[] | select(.protocol=="mtproto") | .settings.users[].secret' "$CONFIG_FILE"
+  echo -n "Введите секрет для удаления: "
+  read -r secret
+  if [[ -z "$secret" ]]; then
+    echo "Отмена: пустой ввод." >&2
+    return 1
+  fi
+  jq --arg secret "$secret" '.inbounds[] |= if .protocol=="mtproto" then .settings.users |= map(select(.secret != $secret)) else . end' "$CONFIG_FILE" > tmp.$$.json && mv tmp.$$.json "$CONFIG_FILE"
+  systemctl restart xray
+  echo "Секрет удалён (если найден)."
+}
+
+list_mtproto_users() {
+  jq -r '.inbounds[] | select(.protocol=="mtproto") | .settings.users[].secret' "$CONFIG_FILE"
+}
+
+add_socks_user() {
+  echo -n "Введите логин: "
+  read -r user
+  echo -n "Введите пароль: "
+  read -r pass
+  if [[ -z "$user" || -z "$pass" ]]; then
+    echo "Логин и пароль не могут быть пустыми!" >&2
+    return 1
+  fi
+  jq --arg user "$user" --arg pass "$pass" '.inbounds[] |= if .protocol=="socks" then .settings.accounts += [{"user": $user, "pass": $pass}] else . end' "$CONFIG_FILE" > tmp.$$.json && mv tmp.$$.json "$CONFIG_FILE"
+  systemctl restart xray
+  echo "Добавлен Socks5 пользователь: $user"
+}
+
+remove_socks_user() {
+  echo "Текущие Socks5 пользователи:"
+  jq -r '.inbounds[] | select(.protocol=="socks") | .settings.accounts[].user' "$CONFIG_FILE"
+  echo -n "Введите логин для удаления: "
+  read -r user
+  if [[ -z "$user" ]]; then
+    echo "Отмена: пустой ввод." >&2
+    return 1
+  fi
+  jq --arg user "$user" '.inbounds[] |= if .protocol=="socks" then .settings.accounts |= map(select(.user != $user)) else . end' "$CONFIG_FILE" > tmp.$$.json && mv tmp.$$.json "$CONFIG_FILE"
+  systemctl restart xray
+  echo "Socks5 пользователь удалён (если найден)."
+}
+
+list_socks_users() {
+  jq -r '.inbounds[] | select(.protocol=="socks") | .settings.accounts[] | "\(.user) : \(.pass)"' "$CONFIG_FILE"
+}
+
+export_vless_link() {
+  local ip pubkey sid sni
+  ip=$(curl -4 -s icanhazip.com || curl -6 -s icanhazip.com || echo "IP_АДРЕС")
+  pubkey=$(awk -F': ' '/Public key/ {print $2}' "$KEYS_FILE")
+  sid=$(awk -F': ' '/shortsid/ {print $2}' "$KEYS_FILE")
+  sni="github.com"
+  for u in $(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE"); do
+    local uuid
+    uuid=$(jq -r --arg email "$u" '.inbounds[0].settings.clients[] | select(.email == $email) | .id' "$CONFIG_FILE")
+    echo "Ссылка для $u:"
+    echo "vless://$uuid@$ip:443?security=reality&sni=$sni&fp=firefox&pbk=$pubkey&sid=$sid&type=tcp&flow=xtls-rprx-vision&encryption=none#$u"
+    echo ""
+  done
+}
 
 main_menu() {
     clear
@@ -88,3 +212,4 @@ main_menu() {
 }
 
 main_menu
+    
