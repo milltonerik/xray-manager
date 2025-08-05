@@ -27,7 +27,6 @@ setup_firewall_iptables() {
         echo "Настраиваем iptables, открывая порты 443/tcp и $SSH_PORT/tcp..."
         iptables -I INPUT -p tcp --dport 443 -j ACCEPT
         iptables -I INPUT -p tcp --dport "${SSH_PORT}" -j ACCEPT
-        
         if command -v iptables-save >/dev/null 2>&1; then
             mkdir -p /etc/iptables
             iptables-save > /etc/iptables/rules.v4
@@ -42,10 +41,8 @@ setup_firewall_iptables() {
 
 install_xray_core() {
   echo "Запуск установки Xray core..."
-
   apt update -y
   apt install -y qrencode curl jq openssl
-
   if ! sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
@@ -54,15 +51,21 @@ install_xray_core() {
   else
     echo "BBR уже включён"
   fi
-
   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || {
-    echo "Ошибка установки Xray"; return 1
+    echo "Ошибка установки Xray"
+    return 1
   }
-
+  [ -f "$KEYS_FILE" ] && rm "$KEYS_FILE"
+  echo "uuid: $(xray uuid)" >> "$KEYS_FILE"
+  xray x25519 >> "$KEYS_FILE"
+  echo "shortsid: $(openssl rand -hex 8)" >> "$KEYS_FILE"
+  chmod 600 "$KEYS_FILE"
   systemctl daemon-reload
   systemctl restart xray
-
-  echo "Xray core успешно установлен и перезапущен."
+  echo ""
+  echo "Xray core успешно установлен."
+  echo "Создан файл ключей: $KEYS_FILE"
+  echo "Используйте пункты меню для управления."
 }
 
 add_vless_user() {
@@ -166,6 +169,69 @@ export_vless_link() {
   done
 }
 
+print_vless_link_with_qr() {
+  local email uuid ip pubkey sid sni link
+  ip=$(curl -4 -s icanhazip.com || curl -6 -s icanhazip.com || echo "IP_АДРЕС")
+  pubkey=$(awk -F': ' '/Public key/ {print $2}' "$KEYS_FILE")
+  sid=$(awk -F': ' '/shortsid/ {print $2}' "$KEYS_FILE")
+  sni="github.com"
+  echo "Выберите пользователя для отображения ссылки и QR-кода:"
+  mapfile -t users < <(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE")
+  if [[ ${#users[@]} -eq 0 ]]; then
+    echo "Нет пользователей VLESS."
+    return
+  fi
+  for i in "${!users[@]}"; do
+    echo "$((i+1)). ${users[$i]}"
+  done
+  echo -n "Введите номер пользователя: "
+  read -r idx
+  if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#users[@]} )); then
+    echo "Некорректный номер."
+    return
+  fi
+  email="${users[$((idx-1))]}"
+  uuid=$(jq -r --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email) | .id' "$CONFIG_FILE")
+  link="vless://$uuid@$ip:443?security=reality&sni=$sni&fp=firefox&pbk=$pubkey&sid=$sid&type=tcp&flow=xtls-rprx-vision&encryption=none#$email"
+  echo ""
+  echo "Ссылка VLESS для $email:"
+  echo "$link"
+  echo ""
+  if command -v qrencode >/dev/null 2>&1; then
+    echo "QR-код:"
+    echo "$link" | qrencode -t ansiutf8
+  else
+    echo "Установите пакет qrencode для отображения QR-кода."
+  fi
+}
+
+print_help() {
+  cat <<EOF
+Менеджер Xray - справка по использованию:
+
+Запуск меню менеджера:
+  sudo $0
+
+Вывести эту справку:
+  sudo $0 help
+
+Основные функции в меню:
+  1) Установить/переустановить Xray + все функции
+  2) Добавить пользователя VLESS
+  3) Удалить пользователя VLESS
+  4) Список VLESS пользователей
+  5) Добавить MTProto секрет
+  6) Удалить MTProto секрет
+  7) Список MTProto секретов
+  8) Добавить Socks5 пользователя
+  9) Удалить Socks5 пользователя
+  10) Список Socks5 пользователей
+  11) Экспортировать ссылки VLESS
+  12) Показать ссылку и QR-код VLESS пользователя
+  13) Выход
+EOF
+}
+
 main_menu() {
     clear
     echo "=== Менеджер Xray ==="
@@ -180,7 +246,8 @@ main_menu() {
     echo "9) Удалить Socks5 пользователя"
     echo "10) Список Socks5 пользователей"
     echo "11) Экспортировать ссылки VLESS"
-    echo "12) Выход"
+    echo "12) Показать ссылку и QR-код VLESS пользователя"
+    echo "13) Выход"
     echo -n "Введите номер: "
     read -r choice
     case $choice in
@@ -203,7 +270,8 @@ main_menu() {
         9) remove_socks_user ;;
         10) list_socks_users ;;
         11) export_vless_link ;;
-        12) exit 0 ;;
+        12) print_vless_link_with_qr ;;
+        13) exit 0 ;;
         *) echo "Неверный пункт меню." ;;
     esac
     echo "Нажмите Enter для продолжения..."
@@ -211,5 +279,9 @@ main_menu() {
     main_menu
 }
 
+if [[ $# -eq 1 && ( "$1" == "help" || "$1" == "--help" ) ]]; then
+  print_help
+  exit 0
+fi
+
 main_menu
-    
