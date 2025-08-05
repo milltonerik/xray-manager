@@ -1,0 +1,90 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+CONFIG_FILE="/usr/local/etc/xray/config.json"
+KEYS_FILE="/usr/local/etc/xray/.keys"
+SSH_PORT=27198
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Запускайте скрипт с правами root." >&2
+    exit 1
+fi
+
+setup_firewall_ufw() {
+    if command -v ufw >/dev/null 2>&1; then
+        echo "Настраиваем ufw открывая порты 443/tcp и $SSH_PORT/tcp..."
+        ufw allow 443/tcp
+        ufw allow "${SSH_PORT}/tcp"
+        echo "Правила UFW добавлены. Не забудьте активировать UFW: 'ufw enable'"
+    else
+        echo "ufw не установлен, пропускаем настройку ufw."
+    fi
+}
+
+setup_firewall_iptables() {
+    if command -v iptables >/dev/null 2>&1; then
+        echo "Настраиваем iptables, открывая порты 443/tcp и $SSH_PORT/tcp..."
+        iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+        iptables -I INPUT -p tcp --dport "${SSH_PORT}" -j ACCEPT
+        
+        if command -v iptables-save >/dev/null 2>&1; then
+            mkdir -p /etc/iptables
+            iptables-save > /etc/iptables/rules.v4
+            echo "Правила iptables сохранены."
+        else
+            echo "Не удалось сохранить правила iptables. Они будут сброшены после перезагрузки."
+        fi
+    else
+        echo "iptables не установлен, пропускаем настройку iptables."
+    fi
+}
+
+# ... (остальные функции скрипта) ...
+
+main_menu() {
+    clear
+    echo "=== Менеджер Xray ==="
+    echo "1) Установить/переустановить Xray + все функции"
+    echo "2) Добавить пользователя VLESS"
+    echo "3) Удалить пользователя VLESS"
+    echo "4) Список VLESS пользователей"
+    echo "5) Добавить MTProto секрет"
+    echo "6) Удалить MTProto секрет"
+    echo "7) Список MTProto секретов"
+    echo "8) Добавить Socks5 пользователя"
+    echo "9) Удалить Socks5 пользователя"
+    echo "10) Список Socks5 пользователей"
+    echo "11) Экспортировать ссылки VLESS"
+    echo "12) Выход"
+    echo -n "Введите номер: "
+    read -r choice
+    case $choice in
+        1) install_xray_core ;;
+        2)
+            echo -n "Email нового VLESS пользователя: "
+            read -r email
+            add_vless_user "$email"
+            ;;
+        3)
+            echo -n "Email пользователя для удаления: "
+            read -r email
+            remove_vless_user "$email"
+            ;;
+        4) list_vless_users ;;
+        5) add_mtproto_user ;;
+        6) remove_mtproto_user ;;
+        7) list_mtproto_users ;;
+        8) add_socks_user ;;
+        9) remove_socks_user ;;
+        10) list_socks_users ;;
+        11) export_vless_link ;;
+        12) exit 0 ;;
+        *) echo "Неверный пункт меню." ;;
+    esac
+    echo "Нажмите Enter для продолжения..."
+    read -r
+    main_menu
+}
+
+main_menu
